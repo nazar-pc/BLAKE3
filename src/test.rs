@@ -1,4 +1,4 @@
-use crate::{CVBytes, CVWords, IncrementCounter, BLOCK_LEN, CHUNK_LEN, OUT_LEN};
+use crate::{platform, CVBytes, CVWords, IncrementCounter, BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 use arrayref::array_ref;
 use arrayvec::ArrayVec;
 use core::usize;
@@ -50,7 +50,8 @@ pub const TEST_CASES: &[usize] = &[
 pub const TEST_CASES_MAX: usize = 100 * CHUNK_LEN;
 
 // There's a test to make sure these two are equal below.
-pub const TEST_KEY: CVBytes = *b"whats the Elvish word for friend";
+pub const TEST_KEY: CVBytes =
+    platform::words_from_le_bytes_32(&*b"whats the Elvish word for friend");
 pub const TEST_KEY_WORDS: CVWords = [
     1952540791, 1752440947, 1816469605, 1752394102, 1919907616, 1868963940, 1919295602, 1684956521,
 ];
@@ -282,10 +283,7 @@ pub fn test_xof_many_fn(xof_many_function: XofManyFunction) {
 
 #[test]
 fn test_key_bytes_equal_key_words() {
-    assert_eq!(
-        TEST_KEY_WORDS,
-        crate::platform::words_from_le_bytes_32(&TEST_KEY),
-    );
+    assert_eq!(TEST_KEY_WORDS, TEST_KEY);
 }
 
 #[test]
@@ -372,23 +370,25 @@ fn test_compare_reference_impl() {
 
         // keyed
         {
-            let mut reference_hasher = reference_impl::Hasher::new_keyed(&TEST_KEY);
+            let mut reference_hasher =
+                reference_impl::Hasher::new_keyed(&platform::le_bytes_from_words_32(&TEST_KEY));
             reference_hasher.update(input);
             let mut expected_out = [0; OUT];
             reference_hasher.finalize(&mut expected_out);
 
             // all at once
-            let test_out = crate::keyed_hash(&TEST_KEY, input);
+            let test_out = crate::keyed_hash(&platform::le_bytes_from_words_32(&TEST_KEY), input);
             assert_eq!(test_out, *array_ref!(expected_out, 0, 32));
             // incremental
-            let mut hasher = crate::Hasher::new_keyed(&TEST_KEY);
+            let mut hasher = crate::Hasher::new_keyed(&platform::le_bytes_from_words_32(&TEST_KEY));
             hasher.update(input);
             assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
             assert_eq!(hasher.finalize(), test_out);
             // incremental (rayon)
             #[cfg(feature = "rayon")]
             {
-                let mut hasher = crate::Hasher::new_keyed(&TEST_KEY);
+                let mut hasher =
+                    crate::Hasher::new_keyed(&platform::le_bytes_from_words_32(&TEST_KEY));
                 hasher.update_rayon(input);
                 assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
                 assert_eq!(hasher.finalize(), test_out);
@@ -409,12 +409,18 @@ fn test_compare_reference_impl() {
 
             // all at once
             let test_out = crate::derive_key(context, input);
-            assert_eq!(test_out, expected_out[..32]);
+            assert_eq!(
+                platform::le_bytes_from_words_32(&test_out),
+                expected_out[..32]
+            );
             // incremental
             let mut hasher = crate::Hasher::new_derive_key(context);
             hasher.update(input);
-            assert_eq!(hasher.finalize(), *array_ref!(expected_out, 0, 32));
-            assert_eq!(hasher.finalize(), *array_ref!(test_out, 0, 32));
+            assert_eq!(
+                &platform::le_bytes_from_words_32(&hasher.finalize().into()),
+                &expected_out[..32]
+            );
+            assert_eq!(hasher.finalize(), test_out);
             // incremental (rayon)
             #[cfg(feature = "rayon")]
             {
@@ -434,12 +440,13 @@ fn test_compare_reference_impl() {
 #[test]
 fn test_compare_reference_impl_long_xof() {
     let mut reference_output = [0u8; 32 * BLOCK_LEN - 1];
-    let mut reference_hasher = reference_impl::Hasher::new_keyed(&TEST_KEY);
+    let mut reference_hasher =
+        reference_impl::Hasher::new_keyed(&platform::le_bytes_from_words_32(&TEST_KEY));
     reference_hasher.update(b"hello world");
     reference_hasher.finalize(&mut reference_output);
 
     let mut test_output = [0u8; 32 * BLOCK_LEN - 1];
-    let mut test_hasher = crate::Hasher::new_keyed(&TEST_KEY);
+    let mut test_hasher = crate::Hasher::new_keyed(&platform::le_bytes_from_words_32(&TEST_KEY));
     test_hasher.update(b"hello world");
     test_hasher.finalize_xof().fill(&mut test_output);
 

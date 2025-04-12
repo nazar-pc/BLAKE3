@@ -150,7 +150,7 @@
 //! of the same input.
 
 use crate::platform::Platform;
-use crate::{CVWords, Hasher, CHUNK_LEN, IV, KEY_LEN, OUT_LEN};
+use crate::{CVWords, Hasher, CHUNK_LEN, IV, KEY_LEN};
 
 /// Extension methods for [`Hasher`]. This is the main entrypoint to the `hazmat` module.
 pub trait HasherExt {
@@ -215,9 +215,8 @@ pub trait HasherExt {
 }
 
 impl HasherExt for Hasher {
-    fn new_from_context_key(context_key: &[u8; KEY_LEN]) -> Hasher {
-        let context_key_words = crate::platform::words_from_le_bytes_32(context_key);
-        Hasher::new_internal(&context_key_words, crate::DERIVE_KEY_MATERIAL)
+    fn new_from_context_key(context_key: &[u32; 8]) -> Hasher {
+        Hasher::new_internal(&context_key, crate::DERIVE_KEY_MATERIAL)
     }
 
     fn set_input_offset(&mut self, offset: u64) -> &mut Hasher {
@@ -407,7 +406,7 @@ impl<'a> Mode<'a> {
         match self {
             Mode::Hash => *IV,
             Mode::KeyedHash(key) => crate::platform::words_from_le_bytes_32(key),
-            Mode::DeriveKeyMaterial(cx_key) => crate::platform::words_from_le_bytes_32(cx_key),
+            Mode::DeriveKeyMaterial(cx_key) => **cx_key,
         }
     }
 
@@ -425,7 +424,7 @@ impl<'a> Mode<'a> {
 /// Besides just sounding fancy, it turns out there are [security
 /// reasons](https://jacko.io/tree_hashing.html) to be careful about the difference between
 /// (root/final) hashes and (non-root/non-final) chaining values.
-pub type ChainingValue = [u8; OUT_LEN];
+pub type ChainingValue = [u32; 8];
 
 fn merge_subtrees_inner(
     left_child: &ChainingValue,
@@ -433,8 +432,8 @@ fn merge_subtrees_inner(
     mode: Mode,
 ) -> crate::Output {
     crate::parent_node_output(
-        &left_child,
-        &right_child,
+        left_child,
+        right_child,
         &mode.key_words(),
         mode.flags_byte(),
         Platform::detect(),
@@ -525,7 +524,7 @@ pub fn merge_subtrees_root_xof(
 }
 
 /// An alias to distinguish [`hash_derive_key_context`] outputs from other keys.
-pub type ContextKey = [u8; KEY_LEN];
+pub type ContextKey = [u32; 8];
 
 /// Hash a [`derive_key`](crate::derive_key) context string and return a [`ContextKey`].
 ///

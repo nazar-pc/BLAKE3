@@ -144,6 +144,7 @@ use arrayref::{array_mut_ref, array_ref};
 use arrayvec::{ArrayString, ArrayVec};
 use core::cmp;
 use core::fmt;
+use core::mem;
 use platform::{Platform, MAX_SIMD_DEGREE, MAX_SIMD_DEGREE_OR_2};
 #[cfg(feature = "zeroize")]
 use zeroize::Zeroize;
@@ -175,7 +176,7 @@ const MAX_DEPTH: usize = 54; // 2^54 * CHUNK_LEN = 2^64
 // needs to hash both input bytes and parent nodes, so its better for its
 // output CVs to be represented as bytes.
 type CVWords = [u32; 8];
-type CVBytes = [u8; 32]; // little-endian
+type CVBytes = [u32; 8]; // little-endian
 
 const IV: &CVWords = &[
     0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
@@ -239,20 +240,29 @@ fn counter_high(counter: u64) -> u32 {
 /// [`FromStr`]: https://doc.rust-lang.org/std/str/trait.FromStr.html
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Hash, Eq)]
-pub struct Hash([u8; OUT_LEN]);
+pub struct Hash([u32; 8]);
 
 impl Hash {
     /// The raw bytes of the `Hash`. Note that byte arrays don't provide
-    /// constant-time equality checking, so if  you need to compare hashes,
+    /// constant-time equality checking, so if you need to compare hashes,
     /// prefer the `Hash` type.
     #[inline]
     pub const fn as_bytes(&self) -> &[u8; OUT_LEN] {
+        // SAFETY: TODO
+        unsafe { mem::transmute(&self.0) }
+    }
+
+    /// The raw words of the `Hash`. Note that byte arrays don't provide
+    /// constant-time equality checking, so if you need to compare hashes,
+    /// prefer the `Hash` type.
+    #[inline]
+    pub const fn as_words(&self) -> &[u32; 8] {
         &self.0
     }
 
     /// Create a `Hash` from its raw bytes representation.
     pub const fn from_bytes(bytes: [u8; OUT_LEN]) -> Self {
-        Self(bytes)
+        Self(platform::words_from_le_bytes_32(&bytes))
     }
 
     /// Create a `Hash` from its raw bytes representation as a slice.
@@ -273,7 +283,7 @@ impl Hash {
     pub fn to_hex(&self) -> ArrayString<{ 2 * OUT_LEN }> {
         let mut s = ArrayString::new();
         let table = b"0123456789abcdef";
-        for &b in self.0.iter() {
+        for &b in platform::le_bytes_from_words_32(&self.0).iter() {
             s.push(table[(b >> 4) as usize] as char);
             s.push(table[(b & 0xf) as usize] as char);
         }
@@ -320,6 +330,20 @@ impl From<[u8; OUT_LEN]> for Hash {
 impl From<Hash> for [u8; OUT_LEN] {
     #[inline]
     fn from(hash: Hash) -> Self {
+        platform::le_bytes_from_words_32(&hash.0)
+    }
+}
+
+impl From<[u32; 8]> for Hash {
+    #[inline]
+    fn from(bytes: [u32; 8]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<Hash> for [u32; 8] {
+    #[inline]
+    fn from(hash: Hash) -> Self {
         hash.0
     }
 }
@@ -345,7 +369,7 @@ impl Zeroize for Hash {
 impl PartialEq for Hash {
     #[inline]
     fn eq(&self, other: &Hash) -> bool {
-        constant_time_eq::constant_time_eq_32(&self.0, &other.0)
+        constant_time_eq::constant_time_eq_32(self.as_bytes(), other.as_bytes())
     }
 }
 
@@ -353,7 +377,16 @@ impl PartialEq for Hash {
 impl PartialEq<[u8; OUT_LEN]> for Hash {
     #[inline]
     fn eq(&self, other: &[u8; OUT_LEN]) -> bool {
-        constant_time_eq::constant_time_eq_32(&self.0, other)
+        constant_time_eq::constant_time_eq_32(self.as_bytes(), other)
+    }
+}
+
+/// This implementation is constant-time.
+impl PartialEq<[u32; 8]> for Hash {
+    #[inline]
+    fn eq(&self, other: &[u32; 8]) -> bool {
+        // SAFETY: TODO
+        constant_time_eq::constant_time_eq_32(self.as_bytes(), unsafe { mem::transmute(other) })
     }
 }
 
@@ -361,7 +394,7 @@ impl PartialEq<[u8; OUT_LEN]> for Hash {
 impl PartialEq<[u8]> for Hash {
     #[inline]
     fn eq(&self, other: &[u8]) -> bool {
-        constant_time_eq::constant_time_eq(&self.0, other)
+        constant_time_eq::constant_time_eq(self.as_bytes(), other)
     }
 }
 
@@ -446,7 +479,7 @@ impl Output {
             self.counter,
             self.flags,
         );
-        platform::le_bytes_from_words_32(&cv)
+        cv
     }
 
     fn root_hash(&self) -> Hash {
@@ -454,7 +487,7 @@ impl Output {
         let mut cv = self.input_chaining_value;
         self.platform
             .compress_in_place(&mut cv, &self.block, self.block_len, 0, self.flags | ROOT);
-        Hash(platform::le_bytes_from_words_32(&cv))
+        Hash(cv)
     }
 
     fn root_output_block(&self) -> [u8; 2 * OUT_LEN] {
@@ -700,7 +733,7 @@ fn compress_chunks_parallel(
         let mut chunk_state = ChunkState::new(key, counter, flags, platform);
         chunk_state.update(chunks_exact.remainder());
         *array_mut_ref!(out, chunks_so_far * OUT_LEN, OUT_LEN) =
-            chunk_state.output().chaining_value();
+            platform::le_bytes_from_words_32(&chunk_state.output().chaining_value());
         chunks_so_far + 1
     } else {
         chunks_so_far
@@ -994,9 +1027,8 @@ pub fn keyed_hash(key: &[u8; KEY_LEN], input: &[u8]) -> Hash {
 /// [`Hasher::update_rayon`](struct.Hasher.html#method.update_rayon).
 ///
 /// [Argon2]: https://en.wikipedia.org/wiki/Argon2
-pub fn derive_key(context: &str, key_material: &[u8]) -> [u8; OUT_LEN] {
-    let context_key = hazmat::hash_derive_key_context(context);
-    let context_key_words = platform::words_from_le_bytes_32(&context_key);
+pub fn derive_key(context: &str, key_material: &[u8]) -> [u32; 8] {
+    let context_key_words = hazmat::hash_derive_key_context(context);
     hash_all_at_once::<join::SerialJoin>(key_material, &context_key_words, DERIVE_KEY_MATERIAL)
         .root_hash()
         .0
@@ -1010,8 +1042,8 @@ fn parent_node_output(
     platform: Platform,
 ) -> Output {
     let mut block = [0; BLOCK_LEN];
-    block[..32].copy_from_slice(left_child);
-    block[32..].copy_from_slice(right_child);
+    block[..32].copy_from_slice(&platform::le_bytes_from_words_32(&left_child));
+    block[32..].copy_from_slice(&platform::le_bytes_from_words_32(&right_child));
     Output {
         input_chaining_value: *key,
         block,
@@ -1099,8 +1131,7 @@ impl Hasher {
     ///
     /// [`derive_key`]: fn.derive_key.html
     pub fn new_derive_key(context: &str) -> Self {
-        let context_key = hazmat::hash_derive_key_context(context);
-        let context_key_words = platform::words_from_le_bytes_32(&context_key);
+        let context_key_words = hazmat::hash_derive_key_context(context);
         Self::new_internal(&context_key_words, DERIVE_KEY_MATERIAL)
     }
 
@@ -1307,9 +1338,12 @@ impl Hasher {
                 // Push the two CVs we received into the CV stack in order. Because
                 // the stack merges lazily, this guarantees we aren't merging the
                 // root.
-                self.push_cv(left_cv, self.chunk_state.chunk_counter);
                 self.push_cv(
-                    right_cv,
+                    &platform::words_from_le_bytes_32(left_cv),
+                    self.chunk_state.chunk_counter,
+                );
+                self.push_cv(
+                    &platform::words_from_le_bytes_32(right_cv),
                     self.chunk_state.chunk_counter + (subtree_chunks / 2),
                 );
             }
