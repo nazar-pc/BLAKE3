@@ -55,12 +55,6 @@ unsafe fn rot7_128(x: __m128i) -> __m128i {
 }
 
 #[inline(always)]
-unsafe fn loadu_512(src: *const u8) -> __m512i {
-    // This is an unaligned load, so the pointer cast is allowed.
-    unsafe { _mm512_loadu_si512(src as *const __m512i) }
-}
-
-#[inline(always)]
 unsafe fn storeu_512(src: __m512i, dest: *mut u8) {
     // This is an unaligned store, so the pointer cast is allowed.
     unsafe { _mm512_storeu_si512(dest as *mut __m512i, src) }
@@ -176,6 +170,16 @@ macro_rules! shuffle2 {
         _mm_castps_si128(_mm_shuffle_ps(
             _mm_castsi128_ps($a),
             _mm_castsi128_ps($b),
+            $c,
+        ))
+    };
+}
+
+macro_rules! shuffle2_512 {
+    ($a:expr, $b:expr, $c:expr) => {
+        _mm512_castps_si512(_mm512_shuffle_ps(
+            _mm512_castsi512_ps($a),
+            _mm512_castsi512_ps($b),
             $c,
         ))
     };
@@ -644,34 +648,73 @@ unsafe fn transpose_vecs(vecs: &mut [__m512i; DEGREE]) {
     }
 }
 
+// Transpose 16 message blocks of 16 words into 16 vectors of 16 lanes.
+//
+// Rather than loading each 64-byte block whole and then running four butterfly
+// stages over the result (64 shuffles, all of which compete for the single
+// shuffle port), load each block as two 256-bit halves and pair input i with
+// input i+8 in one register. That performs the 256-bit stage of the transpose
+// as part of the load, leaving three stages, and the final lane gather then
+// collapses into a single vpermt2d per output vector instead of a pair of
+// vshufi64x2. The instruction count is about the same; what changes is that 16
+// operations per block move off the shuffle port onto the load ports, which is
+// where the win comes from. This is the shape blake3_avx512_x86-64_unix.S uses,
+// down to the two permute index constants.
 #[inline(always)]
 unsafe fn transpose_msg_vecs(inputs: &[*const u8; DEGREE], block_offset: usize) -> [__m512i; 16] {
     unsafe {
-        let mut vecs = [
-            loadu_512(inputs[0].add(block_offset)),
-            loadu_512(inputs[1].add(block_offset)),
-            loadu_512(inputs[2].add(block_offset)),
-            loadu_512(inputs[3].add(block_offset)),
-            loadu_512(inputs[4].add(block_offset)),
-            loadu_512(inputs[5].add(block_offset)),
-            loadu_512(inputs[6].add(block_offset)),
-            loadu_512(inputs[7].add(block_offset)),
-            loadu_512(inputs[8].add(block_offset)),
-            loadu_512(inputs[9].add(block_offset)),
-            loadu_512(inputs[10].add(block_offset)),
-            loadu_512(inputs[11].add(block_offset)),
-            loadu_512(inputs[12].add(block_offset)),
-            loadu_512(inputs[13].add(block_offset)),
-            loadu_512(inputs[14].add(block_offset)),
-            loadu_512(inputs[15].add(block_offset)),
-        ];
+        let gather0 = _mm512_setr_epi32(0, 1, 2, 3, 16, 17, 18, 19, 8, 9, 10, 11, 24, 25, 26, 27);
+        let gather1 =
+            _mm512_setr_epi32(4, 5, 6, 7, 20, 21, 22, 23, 12, 13, 14, 15, 28, 29, 30, 31);
+
+        let mut vecs = [_mm512_setzero_si512(); 16];
+        for half in 0..2 {
+            let off = block_offset + half * 32;
+
+            // Low 256 bits from input i, high 256 bits from input i+8.
+            let mut t = [_mm512_setzero_si512(); 8];
+            for i in 0..8 {
+                let lo = _mm256_loadu_si256(inputs[i].add(off) as *const __m256i);
+                let hi = _mm256_loadu_si256(inputs[i + 8].add(off) as *const __m256i);
+                t[i] = _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
+            }
+
+            // Interleave qwords within each 128-bit lane.
+            let mut u = [_mm512_setzero_si512(); 8];
+            for i in 0..4 {
+                u[2 * i] = _mm512_unpacklo_epi64(t[2 * i], t[2 * i + 1]);
+                u[2 * i + 1] = _mm512_unpackhi_epi64(t[2 * i], t[2 * i + 1]);
+            }
+
+            // Pick one word per input out of each lane, then gather the four
+            // 128-bit lanes of the two halves with one permute each.
+            let lo_a = shuffle2_512!(u[0], u[2], LO_IMM8);
+            let lo_b = shuffle2_512!(u[4], u[6], LO_IMM8);
+            vecs[half * 8] = _mm512_permutex2var_epi32(lo_a, gather0, lo_b);
+            vecs[half * 8 + 4] = _mm512_permutex2var_epi32(lo_a, gather1, lo_b);
+
+            let hi_a = shuffle2_512!(u[0], u[2], HI_IMM8);
+            let hi_b = shuffle2_512!(u[4], u[6], HI_IMM8);
+            vecs[half * 8 + 1] = _mm512_permutex2var_epi32(hi_a, gather0, hi_b);
+            vecs[half * 8 + 5] = _mm512_permutex2var_epi32(hi_a, gather1, hi_b);
+
+            let lo_c = shuffle2_512!(u[1], u[3], LO_IMM8);
+            let lo_d = shuffle2_512!(u[5], u[7], LO_IMM8);
+            vecs[half * 8 + 2] = _mm512_permutex2var_epi32(lo_c, gather0, lo_d);
+            vecs[half * 8 + 6] = _mm512_permutex2var_epi32(lo_c, gather1, lo_d);
+
+            let hi_c = shuffle2_512!(u[1], u[3], HI_IMM8);
+            let hi_d = shuffle2_512!(u[5], u[7], HI_IMM8);
+            vecs[half * 8 + 3] = _mm512_permutex2var_epi32(hi_c, gather0, hi_d);
+            vecs[half * 8 + 7] = _mm512_permutex2var_epi32(hi_c, gather1, hi_d);
+        }
+
         for i in 0..DEGREE {
             _mm_prefetch(
                 inputs[i].wrapping_add(block_offset + 256) as *const i8,
                 _MM_HINT_T0,
             );
         }
-        transpose_vecs(&mut vecs);
         vecs
     }
 }
