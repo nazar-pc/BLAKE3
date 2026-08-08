@@ -6,6 +6,10 @@
   (_mm_castps_si128(                                                           \
       _mm_shuffle_ps(_mm_castsi128_ps(a), _mm_castsi128_ps(b), (c))))
 
+#define _mm256_shuffle_ps2(a, b, c)                                            \
+  (_mm256_castps_si256(                                                        \
+      _mm256_shuffle_ps(_mm256_castsi256_ps(a), _mm256_castsi256_ps(b), (c))))
+
 #define _mm512_shuffle_ps2(a, b, c)                                            \
   (_mm512_castps_si512(                                                        \
       _mm512_shuffle_ps(_mm512_castsi512_ps(a), _mm512_castsi512_ps(b), (c))))
@@ -18,10 +22,6 @@
 
 INLINE __m128i loadu_128(const uint8_t src[16]) {
   return _mm_loadu_si128((void*)src);
-}
-
-INLINE __m256i loadu_256(const uint8_t src[32]) {
-  return _mm256_loadu_si256((void*)src);
 }
 
 INLINE void storeu_128(__m128i src, uint8_t dest[16]) {
@@ -764,29 +764,37 @@ INLINE void transpose_vecs_256(__m256i vecs[8]) {
   vecs[7] = _mm256_permute2x128_si256(abcd_37, efgh_37, 0x31);
 }
 
+// Transpose 8 message blocks of 16 words into 16 vectors of 8 lanes. Same
+// load-fused shape as transpose_msg_vecs16() one width down: pair input i with
+// input i+4 in the two 128-bit lanes of a 256-bit register so the lane stage of
+// the transpose happens during the load, leaving two stages instead of three.
+// Matches the 8-lane path of blake3_avx512_x86-64_unix.S.
 INLINE void transpose_msg_vecs8(const uint8_t *const *inputs,
                                 size_t block_offset, __m256i out[16]) {
-  out[0] = loadu_256(&inputs[0][block_offset + 0 * sizeof(__m256i)]);
-  out[1] = loadu_256(&inputs[1][block_offset + 0 * sizeof(__m256i)]);
-  out[2] = loadu_256(&inputs[2][block_offset + 0 * sizeof(__m256i)]);
-  out[3] = loadu_256(&inputs[3][block_offset + 0 * sizeof(__m256i)]);
-  out[4] = loadu_256(&inputs[4][block_offset + 0 * sizeof(__m256i)]);
-  out[5] = loadu_256(&inputs[5][block_offset + 0 * sizeof(__m256i)]);
-  out[6] = loadu_256(&inputs[6][block_offset + 0 * sizeof(__m256i)]);
-  out[7] = loadu_256(&inputs[7][block_offset + 0 * sizeof(__m256i)]);
-  out[8] = loadu_256(&inputs[0][block_offset + 1 * sizeof(__m256i)]);
-  out[9] = loadu_256(&inputs[1][block_offset + 1 * sizeof(__m256i)]);
-  out[10] = loadu_256(&inputs[2][block_offset + 1 * sizeof(__m256i)]);
-  out[11] = loadu_256(&inputs[3][block_offset + 1 * sizeof(__m256i)]);
-  out[12] = loadu_256(&inputs[4][block_offset + 1 * sizeof(__m256i)]);
-  out[13] = loadu_256(&inputs[5][block_offset + 1 * sizeof(__m256i)]);
-  out[14] = loadu_256(&inputs[6][block_offset + 1 * sizeof(__m256i)]);
-  out[15] = loadu_256(&inputs[7][block_offset + 1 * sizeof(__m256i)]);
+  for (size_t group = 0; group < 4; group++) {
+    size_t off = block_offset + group * 4 * sizeof(uint32_t);
+
+    __m256i t[4];
+    for (size_t i = 0; i < 4; i++) {
+      __m128i lo = _mm_loadu_si128((const __m128i *)&inputs[i][off]);
+      __m128i hi = _mm_loadu_si128((const __m128i *)&inputs[i + 4][off]);
+      t[i] = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
+    }
+
+    __m256i u0 = _mm256_unpacklo_epi64(t[0], t[1]);
+    __m256i u1 = _mm256_unpackhi_epi64(t[0], t[1]);
+    __m256i u2 = _mm256_unpacklo_epi64(t[2], t[3]);
+    __m256i u3 = _mm256_unpackhi_epi64(t[2], t[3]);
+
+    out[group * 4 + 0] = _mm256_shuffle_ps2(u0, u2, LO_IMM8);
+    out[group * 4 + 1] = _mm256_shuffle_ps2(u0, u2, HI_IMM8);
+    out[group * 4 + 2] = _mm256_shuffle_ps2(u1, u3, LO_IMM8);
+    out[group * 4 + 3] = _mm256_shuffle_ps2(u1, u3, HI_IMM8);
+  }
+
   for (size_t i = 0; i < 8; ++i) {
     _mm_prefetch((const void *)&inputs[i][block_offset + 256], _MM_HINT_T0);
   }
-  transpose_vecs_256(&out[0]);
-  transpose_vecs_256(&out[8]);
 }
 
 INLINE void load_counters8(uint64_t counter, bool increment_counter,
