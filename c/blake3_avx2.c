@@ -232,7 +232,7 @@ INLINE void transpose_msg_vecs(const uint8_t *const *inputs,
   }
 
   for (size_t i = 0; i < 8; ++i) {
-    _mm_prefetch((const void *)&inputs[i][block_offset + 256], _MM_HINT_T0);
+    _mm_prefetch((const void *)&inputs[i][block_offset + 128], _MM_HINT_T0);
   }
 }
 
