@@ -890,38 +890,48 @@ mod test {
 
     #[test]
     fn test_compress4_matches_compress_in_place() {
+        // Give each lane a different slice of the painted buffer, so a lane mixup fails the test.
+        let mut input_buf = [0u8; DEGREE * BLOCK_LEN];
+        crate::test::paint_test_input(&mut input_buf);
+
         for block_len in [0u8, 1, 17, 32, 63, 64] {
-            let mut cvs = [[0u32; 8]; DEGREE];
-            let mut blocks = [[0u8; BLOCK_LEN]; DEGREE];
-            for lane in 0..DEGREE {
-                for w in 0..8 {
-                    cvs[lane][w] = (lane as u32 + 1)
-                        .wrapping_mul(0x9E3779B1)
-                        .wrapping_add(w as u32);
+            // See test_hash_many_fn in src/test.rs for why these particular counters matter.
+            for counter in [0u64, u32::MAX as u64, i32::MAX as u64] {
+                for flags in [
+                    crate::CHUNK_START | crate::CHUNK_END | crate::ROOT,
+                    crate::KEYED_HASH | crate::CHUNK_START | crate::CHUNK_END,
+                ] {
+                    let mut cvs = [[0u32; 8]; DEGREE];
+                    let mut blocks = [[0u8; BLOCK_LEN]; DEGREE];
+                    for lane in 0..DEGREE {
+                        // A rotation of TEST_KEY_WORDS, distinct for every lane.
+                        for w in 0..8 {
+                            cvs[lane][w] = crate::test::TEST_KEY_WORDS[(w + lane) % 8];
+                        }
+                        blocks[lane].copy_from_slice(&input_buf[lane * BLOCK_LEN..][..BLOCK_LEN]);
+                    }
+
+                    let mut want_cvs = cvs;
+                    for lane in 0..DEGREE {
+                        crate::portable::compress_in_place(
+                            &mut want_cvs[lane],
+                            &blocks[lane],
+                            block_len,
+                            counter,
+                            flags,
+                        );
+                    }
+
+                    unsafe {
+                        compress4(&mut cvs, &blocks, block_len, counter, flags);
+                    }
+
+                    assert_eq!(
+                        cvs, want_cvs,
+                        "block_len {block_len} counter {counter} flags {flags}"
+                    );
                 }
-                for b in 0..block_len as usize {
-                    blocks[lane][b] = (lane * 7 + b * 13 + 1) as u8;
-                }
             }
-            let counter = 0x1122_3344_5566_7788u64;
-            let flags = crate::CHUNK_START | crate::CHUNK_END | crate::ROOT;
-
-            let mut want_cvs = cvs;
-            for lane in 0..DEGREE {
-                crate::portable::compress_in_place(
-                    &mut want_cvs[lane],
-                    &blocks[lane],
-                    block_len,
-                    counter,
-                    flags,
-                );
-            }
-
-            unsafe {
-                compress4(&mut cvs, &blocks, block_len, counter, flags);
-            }
-
-            assert_eq!(cvs, want_cvs, "block_len {block_len}");
         }
     }
 }

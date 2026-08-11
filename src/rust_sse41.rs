@@ -3,11 +3,12 @@ use core::arch::x86::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
-use crate::{
-    BLOCK_LEN, CVBytes, CVWords, IV, IncrementCounter, MSG_SCHEDULE, OUT_LEN, counter_high,
-    counter_low,
-};
-use arrayref::{array_mut_ref, array_ref, mut_array_refs};
+use crate::{BLOCK_LEN, CVWords, IV, MSG_SCHEDULE, counter_high, counter_low};
+#[cfg(blake3_sse41_rust)]
+use crate::{CVBytes, IncrementCounter, OUT_LEN};
+use arrayref::mut_array_refs;
+#[cfg(blake3_sse41_rust)]
+use arrayref::{array_mut_ref, array_ref};
 
 pub const DEGREE: usize = 4;
 
@@ -38,6 +39,7 @@ unsafe fn set1(x: u32) -> __m128i {
     unsafe { _mm_set1_epi32(x as i32) }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn set4(a: u32, b: u32, c: u32, d: u32) -> __m128i {
     unsafe { _mm_setr_epi32(a as i32, b as i32, c as i32, d as i32) }
@@ -71,6 +73,7 @@ unsafe fn rot7(a: __m128i) -> __m128i {
     unsafe { _mm_or_si128(_mm_srli_epi32(a, 7), _mm_slli_epi32(a, 32 - 7)) }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn g1(
     row0: &mut __m128i,
@@ -89,6 +92,7 @@ unsafe fn g1(
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn g2(
     row0: &mut __m128i,
@@ -108,12 +112,14 @@ unsafe fn g2(
 }
 
 // Adapted from https://github.com/rust-lang-nursery/stdsimd/pull/479.
+#[cfg(blake3_sse41_rust)]
 macro_rules! _MM_SHUFFLE {
     ($z:expr, $y:expr, $x:expr, $w:expr) => {
         ($z << 6) | ($y << 4) | ($x << 2) | $w
     };
 }
 
+#[cfg(blake3_sse41_rust)]
 macro_rules! shuffle2 {
     ($a:expr, $b:expr, $c:expr) => {
         _mm_castps_si128(_mm_shuffle_ps(
@@ -127,6 +133,7 @@ macro_rules! shuffle2 {
 // Note the optimization here of leaving row1 as the unrotated row, rather than
 // row0. All the message loads below are adjusted to compensate for this. See
 // discussion at https://github.com/sneves/blake2-avx2/pull/4
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn diagonalize(row0: &mut __m128i, row2: &mut __m128i, row3: &mut __m128i) {
     unsafe {
@@ -136,6 +143,7 @@ unsafe fn diagonalize(row0: &mut __m128i, row2: &mut __m128i, row3: &mut __m128i
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn undiagonalize(row0: &mut __m128i, row2: &mut __m128i, row3: &mut __m128i) {
     unsafe {
@@ -145,6 +153,7 @@ unsafe fn undiagonalize(row0: &mut __m128i, row2: &mut __m128i, row3: &mut __m12
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn compress_pre(
     cv: &CVWords,
@@ -333,6 +342,7 @@ unsafe fn compress_pre(
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[target_feature(enable = "sse4.1")]
 pub unsafe fn compress_in_place(
     cv: &mut CVWords,
@@ -348,6 +358,7 @@ pub unsafe fn compress_in_place(
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[target_feature(enable = "sse4.1")]
 pub unsafe fn compress_xof(
     cv: &CVWords,
@@ -546,6 +557,7 @@ unsafe fn transpose_msg_vecs(inputs: &[*const u8; DEGREE], block_offset: usize) 
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[inline(always)]
 unsafe fn load_counters(counter: u64, increment_counter: IncrementCounter) -> (__m128i, __m128i) {
     let mask = if increment_counter.yes() { !0 } else { 0 };
@@ -567,6 +579,7 @@ unsafe fn load_counters(counter: u64, increment_counter: IncrementCounter) -> (_
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[target_feature(enable = "sse4.1")]
 pub unsafe fn hash4(
     inputs: &[*const u8; DEGREE],
@@ -658,6 +671,7 @@ pub unsafe fn hash4(
     }
 }
 
+#[cfg(blake3_sse41_rust)]
 #[target_feature(enable = "sse4.1")]
 unsafe fn hash1<const N: usize>(
     input: &[u8; N],
@@ -691,6 +705,7 @@ unsafe fn hash1<const N: usize>(
     *out = unsafe { core::mem::transmute(cv) }; // x86 is little-endian
 }
 
+#[cfg(blake3_sse41_rust)]
 #[target_feature(enable = "sse4.1")]
 pub unsafe fn hash_many<const N: usize>(
     mut inputs: &[&[u8; N]],
@@ -869,6 +884,7 @@ mod test {
         }
     }
 
+    #[cfg(blake3_sse41_rust)]
     #[test]
     fn test_compress() {
         if !crate::platform::sse41_detected() {
@@ -877,6 +893,7 @@ mod test {
         crate::test::test_compress_fn(compress_in_place, compress_xof);
     }
 
+    #[cfg(blake3_sse41_rust)]
     #[test]
     fn test_hash_many() {
         if !crate::platform::sse41_detected() {
@@ -890,38 +907,48 @@ mod test {
         if !crate::platform::sse41_detected() {
             return;
         }
+        // Give each lane a different slice of the painted buffer, so a lane mixup fails the test.
+        let mut input_buf = [0u8; DEGREE * BLOCK_LEN];
+        crate::test::paint_test_input(&mut input_buf);
+
         for block_len in [0u8, 1, 17, 32, 63, 64] {
-            let mut cvs = [[0u32; 8]; DEGREE];
-            let mut blocks = [[0u8; BLOCK_LEN]; DEGREE];
-            for lane in 0..DEGREE {
-                for w in 0..8 {
-                    cvs[lane][w] = (lane as u32 + 1)
-                        .wrapping_mul(0x9E3779B1)
-                        .wrapping_add(w as u32);
+            // See test_hash_many_fn in src/test.rs for why these particular counters matter.
+            for counter in [0u64, u32::MAX as u64, i32::MAX as u64] {
+                for flags in [
+                    crate::CHUNK_START | crate::CHUNK_END | crate::ROOT,
+                    crate::KEYED_HASH | crate::CHUNK_START | crate::CHUNK_END,
+                ] {
+                    let mut cvs = [[0u32; 8]; DEGREE];
+                    let mut blocks = [[0u8; BLOCK_LEN]; DEGREE];
+                    for lane in 0..DEGREE {
+                        // A rotation of TEST_KEY_WORDS, distinct for every lane.
+                        for w in 0..8 {
+                            cvs[lane][w] = crate::test::TEST_KEY_WORDS[(w + lane) % 8];
+                        }
+                        blocks[lane].copy_from_slice(&input_buf[lane * BLOCK_LEN..][..BLOCK_LEN]);
+                    }
+
+                    let mut want_cvs = cvs;
+                    for lane in 0..DEGREE {
+                        crate::portable::compress_in_place(
+                            &mut want_cvs[lane],
+                            &blocks[lane],
+                            block_len,
+                            counter,
+                            flags,
+                        );
+                    }
+
+                    unsafe {
+                        compress4(&mut cvs, &blocks, block_len, counter, flags);
+                    }
+
+                    assert_eq!(
+                        cvs, want_cvs,
+                        "block_len {block_len} counter {counter} flags {flags}"
+                    );
                 }
-                for b in 0..block_len as usize {
-                    blocks[lane][b] = (lane * 7 + b * 13 + 1) as u8;
-                }
             }
-            let counter = 0x1122_3344_5566_7788u64;
-            let flags = crate::CHUNK_START | crate::CHUNK_END | crate::ROOT;
-
-            let mut want_cvs = cvs;
-            for lane in 0..DEGREE {
-                crate::portable::compress_in_place(
-                    &mut want_cvs[lane],
-                    &blocks[lane],
-                    block_len,
-                    counter,
-                    flags,
-                );
-            }
-
-            unsafe {
-                compress4(&mut cvs, &blocks, block_len, counter, flags);
-            }
-
-            assert_eq!(cvs, want_cvs, "block_len {block_len}");
         }
     }
 }
