@@ -96,40 +96,68 @@ pub mod guts;
 
 pub mod hazmat;
 
+pub mod many;
+
 /// Undocumented and unstable, for benchmarks only.
 #[doc(hidden)]
 pub mod platform;
 
 // Platform-specific implementations of the compression function. These
 // BLAKE3-specific cfg flags are set in build.rs.
-#[cfg(blake3_avx2_rust)]
-#[path = "rust_avx2.rs"]
-mod avx2;
-#[cfg(blake3_avx2_ffi)]
-#[path = "ffi_avx2.rs"]
-mod avx2;
-#[cfg(blake3_avx512_ffi)]
-#[path = "ffi_avx512.rs"]
-mod avx512;
-#[cfg(blake3_neon)]
-#[path = "ffi_neon.rs"]
-mod neon;
+//
+// Each backend is declared under its own file name, and the short name that the
+// rest of the crate uses (`sse2`, `sse41`, `avx2`, ...) is an alias for whichever
+// implementation this build selected.
+//
+// The SSE2/SSE4.1/AVX2 Rust intrinsics are compiled on x86 even when hash_many()
+// comes from assembly, because they also implement compress_many(), which has no
+// assembly or C counterpart to bind to. In those builds everything else in them
+// is unused, hence the conditional dead_code allowance.
 mod portable;
-#[cfg(blake3_sse2_rust)]
-#[path = "rust_sse2.rs"]
-mod sse2;
+
 #[cfg(blake3_sse2_ffi)]
-#[path = "ffi_sse2.rs"]
-mod sse2;
-#[cfg(blake3_sse41_rust)]
-#[path = "rust_sse41.rs"]
-mod sse41;
+mod ffi_sse2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg_attr(blake3_sse2_ffi, allow(dead_code))]
+mod rust_sse2;
+#[cfg(blake3_sse2_ffi)]
+pub(crate) use ffi_sse2 as sse2;
+#[cfg(blake3_sse2_rust)]
+pub(crate) use rust_sse2 as sse2;
+
 #[cfg(blake3_sse41_ffi)]
-#[path = "ffi_sse41.rs"]
-mod sse41;
+mod ffi_sse41;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg_attr(blake3_sse41_ffi, allow(dead_code))]
+mod rust_sse41;
+#[cfg(blake3_sse41_ffi)]
+pub(crate) use ffi_sse41 as sse41;
+#[cfg(blake3_sse41_rust)]
+pub(crate) use rust_sse41 as sse41;
+
+#[cfg(blake3_avx2_ffi)]
+mod ffi_avx2;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg_attr(blake3_avx2_ffi, allow(dead_code))]
+mod rust_avx2;
+#[cfg(blake3_avx2_ffi)]
+pub(crate) use ffi_avx2 as avx2;
+#[cfg(blake3_avx2_rust)]
+pub(crate) use rust_avx2 as avx2;
+
+// AVX-512 and NEON have no Rust intrinsics implementation in this crate, so
+// unlike the three above they have only the one backend.
+#[cfg(blake3_avx512_ffi)]
+mod ffi_avx512;
+#[cfg(blake3_avx512_ffi)]
+pub(crate) use ffi_avx512 as avx512;
+
+#[cfg(blake3_neon)]
+mod ffi_neon;
+#[cfg(blake3_neon)]
+pub(crate) use ffi_neon as neon;
 
 #[cfg(blake3_wasm32_simd)]
-#[path = "wasm32_simd.rs"]
 mod wasm32_simd;
 
 #[cfg(feature = "traits-preview")]
